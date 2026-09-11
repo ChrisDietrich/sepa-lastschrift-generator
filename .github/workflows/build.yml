@@ -9,7 +9,11 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [windows-latest, macos-latest]
+        include:
+          - os: windows-latest
+            asset_name: SEPA-Lastschrift-Generator-Windows.exe
+          - os: macos-latest
+            asset_name: SEPA-Lastschrift-Generator-macOS.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -24,8 +28,39 @@ jobs:
       - name: Build executable
         run: pyinstaller --onefile --windowed --name SEPA-Lastschrift-Generator gui.py
 
-      - name: Upload build
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cp dist/SEPA-Lastschrift-Generator.exe "${{ matrix.asset_name }}"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: ditto -c -k --sequesterRsrc --keepParent dist/SEPA-Lastschrift-Generator.app "${{ matrix.asset_name }}"
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SEPA-Lastschrift-Generator-${{ matrix.os }}
-          path: dist/*
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: "Release 'latest' aktualisieren"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag --repo "${{ github.repository }}" || true
+          gh release create latest artifacts/* \
+            --repo "${{ github.repository }}" \
+            --title "Aktuelle Version" \
+            --notes "Automatisch gebaut aus dem main-Branch (Commit ${{ github.sha }})."
