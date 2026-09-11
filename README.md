@@ -38,14 +38,23 @@ aktualisiert - kein GitHub-Account zum Herunterladen nötig.
 4. Fälligkeitstag eintragen (Format `TT.MM.JJJJ`) oder **„+7 Tage"**
    klicken. Bitte anhand der Vorlagefrist eurer Bank prüfen, ob 7 Tage
    ausreichen.
-5. **„SEPA-Datei erstellen"** klicken. Die XML-Datei landet im selben
-   Ordner wie die Mitgliederliste.
+5. **„SEPA-Datei erstellen"** klicken. Die XML-Datei(en) landen im selben
+   Ordner wie die Mitgliederliste, benannt nach dem Dateinamen der
+   Mitgliederliste plus `SEPA` (z. B. `mitgliederSEPA.xml`; bei mehreren
+   Tabellenblättern zusätzlich mit Blattname). Standardmäßig als
+   Einzelbuchung; „Sammelbuchung" lässt sich unter „Erweiterte
+   Einstellungen anzeigen" aktivieren.
 
 
 ## Format der Mitgliederliste
 
-Spalten A-H (Kopfzeile in Zeile 1, Daten ab Zeile 2, Tabellenblattname
-`SEPA_Lastschrift` bzw. per `--sheet` änderbar):
+Spalten A-H (Kopfzeile in Zeile 1, Daten ab Zeile 2). Der Tabellenblattname
+ist beliebig. Enthält die Datei mehrere Tabellenblätter, wird automatisch
+jedes sichtbare Blatt verarbeitet - für jedes Blatt mit passenden Daten
+entsteht eine eigene SEPA-Datei; Blätter ohne passendes Schema (z. B.
+Notizen) werden übersprungen und als Hinweis gemeldet, ohne die anderen
+Blätter zu blockieren. Ein bestimmtes Blatt lässt sich über `--sheet`
+gezielt auswählen (nur CLI).
 
 | Spalte | Inhalt                           | Pflicht |
 |--------|----------------------------------|---------|

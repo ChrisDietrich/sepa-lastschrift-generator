@@ -16,6 +16,7 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from tkinter.scrolledtext import ScrolledText
 
 import sepa_lastschrift as sepa
 
@@ -189,7 +190,7 @@ class App(tk.Tk):
             values=["CORE", "B2B"], width=8,
         ).grid(row=1, column=1, sticky="w", **pad)
 
-        self.batch_var = tk.BooleanVar(value=True)
+        self.batch_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             self.adv_frame, text="Sammelbuchung (statt Einzelbuchung)", variable=self.batch_var,
         ).grid(row=2, column=0, columnspan=2, sticky="w", **pad)
@@ -203,10 +204,17 @@ class App(tk.Tk):
         ttk.Button(btn_frame, text="Vereinsdaten...", command=self.edit_creditor).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(btn_frame, text="SEPA-Datei erstellen", command=self.generate).grid(row=0, column=1)
 
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(frm, textvariable=self.status_var, foreground="#555", wraplength=380).grid(
-            row=12, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        ttk.Label(frm, text="Ergebnis", font=("", 10, "bold")).grid(
+            row=12, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
+        self.result_text = ScrolledText(frm, height=8, width=48, wrap="word", state="disabled")
+        self.result_text.grid(row=13, column=0, columnspan=2, sticky="w", padx=10, pady=6)
+
+        self.last_output_dir: Path | None = None
+        self.open_folder_btn = ttk.Button(
+            frm, text="Ordner öffnen", command=self.open_last_folder, state="disabled",
+        )
+        self.open_folder_btn.grid(row=14, column=0, sticky="w", padx=10, pady=(0, 6))
 
         self.refresh_creditor_display()
         if not CREDITOR_PATH.exists():
@@ -236,6 +244,16 @@ class App(tk.Tk):
 
     def fill_default_date(self) -> None:
         self.date_var.set((dt.date.today() + dt.timedelta(days=7)).strftime("%d.%m.%Y"))
+
+    def set_result_text(self, text: str) -> None:
+        self.result_text.configure(state="normal")
+        self.result_text.delete("1.0", "end")
+        self.result_text.insert("1.0", text)
+        self.result_text.configure(state="disabled")
+
+    def open_last_folder(self) -> None:
+        if self.last_output_dir is not None:
+            open_folder(self.last_output_dir)
 
     def toggle_advanced(self) -> None:
         if self.advanced_visible.get():
@@ -271,7 +289,7 @@ class App(tk.Tk):
             return
 
         try:
-            result = sepa.generate_sepa_file(
+            summary = sepa.generate_sepa_file(
                 input_path=self.input_path,
                 creditor_path=CREDITOR_PATH,
                 collection_date=collection_date,
@@ -296,21 +314,33 @@ class App(tk.Tk):
         except sepa.NoRowsError as exc:
             messagebox.showerror("Fehler", str(exc))
             return
+        except sepa.NoValidSheetsError as exc:
+            messagebox.showerror(
+                "Keine gültigen Daten gefunden",
+                "In keinem Tabellenblatt wurden gültige Lastschriftdaten gefunden:\n\n"
+                + "\n".join(f"- {name}: {reason}" for name, reason in exc.skipped),
+            )
+            return
         except (KeyError, sepa.ValidationError) as exc:
             messagebox.showerror("Fehler in den Vereinsdaten", str(exc))
             return
 
-        self.status_var.set(f"Erstellt: {result.output_path.name}")
-        open_now = messagebox.askyesno(
-            "SEPA-Datei erstellt",
-            "Die SEPA-XML-Datei wurde erfolgreich erstellt.\n\n"
-            f"Anzahl Datensätze: {result.row_count}\n"
-            f"Summe: {result.total_amount:.2f} {result.currency}\n"
-            f"Datei: {result.output_path}\n\n"
-            "Ordner jetzt öffnen?",
-        )
-        if open_now:
-            open_folder(result.output_path.parent)
+        n = len(summary.results)
+        lines = [f"{n} SEPA-XML-Datei{'en' if n != 1 else ''} erfolgreich erstellt:", ""]
+        for r in summary.results:
+            label = f" (Blatt '{r.sheet_name}')" if r.sheet_name else ""
+            lines.append(f"{r.output_path.name}{label}")
+            lines.append(f"  {r.row_count} Datensätze, Summe {r.total_amount:.2f} {r.currency}")
+
+        if summary.skipped:
+            lines.append("")
+            lines.append("Übersprungene Tabellenblätter (kein passendes Schema):")
+            for name, reason in summary.skipped:
+                lines.append(f"- {name}: {reason}")
+
+        self.set_result_text("\n".join(lines))
+        self.last_output_dir = summary.results[0].output_path.parent
+        self.open_folder_btn.configure(state="normal")
 
 
 def main() -> None:

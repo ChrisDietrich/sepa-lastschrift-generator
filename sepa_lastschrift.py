@@ -2,11 +2,16 @@
 """SEPA-Lastschrift (pain.008.001.02) aus einer Excel-/CSV-Tabelle erzeugen.
 
 Ersetzt das VBA-Makro aus Excel2SepaXML.xlsm (Klassen clsSepaCDD /
-clsSepaDebitInfo / clsCheckIBAN). Erwartet dieselbe Spaltenreihenfolge wie
-das Blatt "SEPA_Lastschrift" im Original:
+clsSepaDebitInfo / clsCheckIBAN). Erwartet in jedem Tabellenblatt (Name ist
+egal) dieselbe Spaltenreihenfolge wie im Original:
 
     A Name  B Betrag  C BIC  D IBAN  E Verwendungszweck
     F EndToEndId  G Mandatsreferenz  H Datum der Mandatsunterschrift
+
+Bei einer Excel-Datei mit mehreren Tabellenblättern wird ohne --sheet jedes
+sichtbare Blatt versucht: passt das Schema nicht (keine/fehlerhafte Daten),
+wird das Blatt übersprungen und am Ende gemeldet, statt die Verarbeitung
+abzubrechen - für jedes passende Blatt entsteht eine eigene SEPA-Datei.
 
 Aufruf:
     python3 sepa_lastschrift.py mitglieder.xlsx --collection-date 01.10.2026
@@ -43,7 +48,7 @@ class ValidationError(Exception):
 
 
 class SheetNotFoundError(Exception):
-    """Das angegebene Tabellenblatt existiert nicht in der Excel-Datei."""
+    """Das per --sheet angegebene Tabellenblatt existiert nicht in der Excel-Datei."""
 
 
 class NoRowsError(Exception):
@@ -60,6 +65,20 @@ class RowValidationErrors(Exception):
     def __init__(self, errors: list[str]):
         super().__init__("; ".join(errors))
         self.errors = errors
+
+
+class NoValidSheetsError(Exception):
+    """Im Automatik-Modus (kein --sheet angegeben) enthielt kein einziges
+    Tabellenblatt der Datei gültige Lastschriftdaten.
+
+    Trägt die Gründe pro übersprungenem Blatt in .skipped (Liste aus
+    (Blattname, Grund)-Tupeln), damit die GUI sie anzeigen kann.
+    """
+
+    def __init__(self, skipped: list[tuple[str, str]]):
+        reasons = "; ".join(f"{name}: {reason}" for name, reason in skipped)
+        super().__init__(f"Kein Tabellenblatt enthielt gültige Lastschriftdaten ({reasons})")
+        self.skipped = skipped
 
 
 def replace_umlaut(text: str) -> str:
@@ -253,16 +272,20 @@ class DebitRow:
         )
 
 
-def read_rows_from_workbook(path: Path, sheet_name: str) -> list[tuple]:
+def open_workbook(path: Path):
     import openpyxl
 
-    wb = openpyxl.load_workbook(path, data_only=True)
-    if sheet_name not in wb.sheetnames:
-        raise SheetNotFoundError(
-            f"Blatt '{sheet_name}' nicht gefunden. Vorhandene Blätter: {', '.join(wb.sheetnames)}"
-        )
-    ws = wb[sheet_name]
+    return openpyxl.load_workbook(path, data_only=True)
 
+
+def visible_sheet_names(wb) -> list[str]:
+    """Nur sichtbare Blätter - versteckte Hilfsblätter (z. B. Nachschlagelisten aus
+    dem Original-Template) sollen im Automatik-Modus nicht als Datenblätter versucht
+    oder als übersprungen gemeldet werden."""
+    return [ws.title for ws in wb.worksheets if ws.sheet_state == "visible"]
+
+
+def extract_rows(ws) -> list[tuple]:
     rows = []
     # Wie im Original: ab Zeile 2, bis Spalte A (Name) leer ist
     for r in range(2, ws.max_row + 1):
@@ -286,12 +309,14 @@ def read_rows_from_csv(path: Path) -> list[tuple]:
     return rows
 
 
-def load_debit_rows(path: Path, sheet_name: str) -> list[DebitRow]:
-    if path.suffix.lower() == ".csv":
-        raw_rows = read_rows_from_csv(path)
-    else:
-        raw_rows = read_rows_from_workbook(path, sheet_name)
+def rows_from_raw(raw_rows: list[tuple]) -> list[DebitRow]:
+    """Validiert Rohzeilen (aus Excel oder CSV) zu DebitRow-Objekten.
 
+    Wirft RowValidationErrors, wenn einzelne Zeilen fehlerhaft sind. Eine leere
+    Eingabe ergibt bewusst eine leere Liste statt eines Fehlers - der Aufrufer
+    entscheidet, ob das ein Fehler ("Datei/Blatt hat keine Daten") oder im
+    Automatik-Modus nur ein Grund zum Überspringen dieses Blatts ist.
+    """
     rows: list[DebitRow] = []
     errors: list[str] = []
     for i, raw in enumerate(raw_rows, start=2):
@@ -421,6 +446,15 @@ class GenerationResult:
     row_count: int
     total_amount: Decimal
     currency: str
+    sheet_name: str | None = None
+
+
+@dataclass
+class GenerationSummary:
+    results: list[GenerationResult]
+    # (Blattname, Grund) für Blätter, die im Automatik-Modus übersprungen wurden,
+    # weil ihr Inhalt nicht wie eine Lastschrift-Tabelle aussah.
+    skipped: list[tuple[str, str]]
 
 
 def generate_sepa_file(
@@ -430,42 +464,106 @@ def generate_sepa_file(
     collection_date: dt.date,
     sequence_type: str = "RCUR",
     instrument_code: str = "CORE",
-    batch_booking: bool = True,
+    batch_booking: bool = False,
     message_id: str | None = None,
     payment_id: str | None = None,
     out_dir: Path | None = None,
-    sheet_name: str = "SEPA_Lastschrift",
-) -> GenerationResult:
+    sheet_name: str | None = None,
+) -> GenerationSummary:
     """Gemeinsamer Ablauf für CLI (main()) und GUI (gui.py): Gläubigerdaten laden,
     Zeilen einlesen und prüfen, XML bauen und schreiben.
 
-    Wirft FileNotFoundError/KeyError/ValidationError (Gläubigerdatei), SheetNotFoundError,
-    RowValidationErrors oder NoRowsError - der Aufrufer entscheidet, wie er das anzeigt
-    (stderr bei der CLI, Dialogfenster bei der GUI).
+    Bei einer CSV-Datei oder explizit angegebenem `sheet_name` wird genau eine
+    SEPA-Datei erzeugt; Fehler (leer/ungültig) brechen die Verarbeitung ab.
+
+    Ohne `sheet_name` (Automatik-Modus, nur bei Excel-Dateien) wird jedes
+    sichtbare Tabellenblatt versucht: enthält es gültige Lastschriftdaten, wird
+    eine eigene SEPA-Datei dafür erzeugt; enthält es gar keine oder fehlerhafte
+    Daten (falsches Schema), wird es übersprungen und der Grund in
+    `GenerationSummary.skipped` vermerkt, ohne die übrigen Blätter zu blockieren.
+    Enthält am Ende kein einziges Blatt gültige Daten, wird NoValidSheetsError
+    geworfen.
+
+    Wirft außerdem FileNotFoundError/KeyError/ValidationError (Gläubigerdatei),
+    SheetNotFoundError (explizit angegebenes Blatt existiert nicht),
+    RowValidationErrors oder NoRowsError (CSV oder explizites Blatt ohne Daten) -
+    der Aufrufer entscheidet, wie er das anzeigt (stderr bei der CLI,
+    Dialogfenster bei der GUI).
     """
     creditor = Creditor.load(creditor_path).validate()
-    rows = load_debit_rows(input_path, sheet_name)
-    if not rows:
-        raise NoRowsError("Keine Einzelinformationen gefunden - es wurde keine SEPA-Datei erstellt.")
-
-    message_id = check_restricted_id(message_id or default_id(), "Die Message-ID")
-    payment_id = check_restricted_id(payment_id or default_id(), "Die Payment-Information-ID")
-
-    tree = build_pain008(
-        creditor, rows,
-        message_id=message_id, payment_id=payment_id, collection_date=collection_date,
-        sequence_type=sequence_type, instrument_code=instrument_code,
-        batch_booking=batch_booking,
-    )
-
     out_dir = out_dir or input_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
-    prefix = "CDB" if instrument_code == "B2B" else "CDD"
-    out_path = out_dir / f"{prefix}_{clean_path_string(message_id)}_{clean_path_string(payment_id)}.xml"
-    tree.write(out_path, encoding="UTF-8", xml_declaration=True)
 
-    total = sum((r.amount for r in rows), Decimal("0.00"))
-    return GenerationResult(output_path=out_path, row_count=len(rows), total_amount=total, currency=creditor.currency)
+    def write_file(rows: list[DebitRow], label: str | None, filename: str, suffix: str | None) -> GenerationResult:
+        mid = message_id or default_id()
+        pid = payment_id or default_id()
+        if suffix:
+            mid, pid = f"{mid}-{suffix}", f"{pid}-{suffix}"
+        mid = check_restricted_id(mid, "Die Message-ID")
+        pid = check_restricted_id(pid, "Die Payment-Information-ID")
+
+        tree = build_pain008(
+            creditor, rows,
+            message_id=mid, payment_id=pid, collection_date=collection_date,
+            sequence_type=sequence_type, instrument_code=instrument_code,
+            batch_booking=batch_booking,
+        )
+        out_path = out_dir / filename
+        tree.write(out_path, encoding="UTF-8", xml_declaration=True)
+        total = sum((r.amount for r in rows), Decimal("0.00"))
+        return GenerationResult(
+            output_path=out_path, row_count=len(rows), total_amount=total,
+            currency=creditor.currency, sheet_name=label,
+        )
+
+    if input_path.suffix.lower() == ".csv":
+        rows = rows_from_raw(read_rows_from_csv(input_path))
+        if not rows:
+            raise NoRowsError("Keine Einzelinformationen gefunden - es wurde keine SEPA-Datei erstellt.")
+        result = write_file(rows, None, f"{input_path.stem}SEPA.xml", suffix=None)
+        return GenerationSummary(results=[result], skipped=[])
+
+    wb = open_workbook(input_path)
+
+    if sheet_name is not None:
+        if sheet_name not in wb.sheetnames:
+            raise SheetNotFoundError(
+                f"Blatt '{sheet_name}' nicht gefunden. Vorhandene Blätter: {', '.join(wb.sheetnames)}"
+            )
+        rows = rows_from_raw(extract_rows(wb[sheet_name]))
+        if not rows:
+            raise NoRowsError("Keine Einzelinformationen gefunden - es wurde keine SEPA-Datei erstellt.")
+        result = write_file(rows, sheet_name, f"{input_path.stem}SEPA.xml", suffix=None)
+        return GenerationSummary(results=[result], skipped=[])
+
+    # Automatik-Modus: jedes sichtbare Blatt versuchen, unpassende überspringen
+    # statt abzubrechen - siehe Docstring oben.
+    sheets = visible_sheet_names(wb)
+    multiple = len(sheets) > 1
+    results: list[GenerationResult] = []
+    skipped: list[tuple[str, str]] = []
+
+    for index, name in enumerate(sheets, start=1):
+        try:
+            rows = rows_from_raw(extract_rows(wb[name]))
+        except RowValidationErrors as exc:
+            skipped.append((name, f"fehlerhafte Daten ({'; '.join(exc.errors)})"))
+            continue
+        if not rows:
+            skipped.append((name, "keine Lastschriftdaten gefunden (Schema passt nicht)"))
+            continue
+
+        filename = (
+            f"{input_path.stem}SEPA.xml" if not multiple
+            else f"{input_path.stem}SEPA_{clean_path_string(name)}.xml"
+        )
+        suffix = str(index) if multiple else None
+        results.append(write_file(rows, name, filename, suffix=suffix))
+
+    if not results:
+        raise NoValidSheetsError(skipped)
+
+    return GenerationSummary(results=results, skipped=skipped)
 
 
 class _HelpFormatter(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
@@ -512,14 +610,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "input", type=Path,
-        help="Excel- (.xlsx/.xlsm) oder CSV-Datei mit den Lastschriftzeilen (Spalten wie im "
-             "Original-Blatt 'SEPA_Lastschrift': Name, Betrag, BIC, IBAN, Verwendungszweck, "
-             "EndToEndId, Mandatsreferenz, Datum Mandatsunterschrift)",
+        help="Excel- (.xlsx/.xlsm) oder CSV-Datei mit den Lastschriftzeilen (Spalten: Name, "
+             "Betrag, BIC, IBAN, Verwendungszweck, EndToEndId, Mandatsreferenz, Datum "
+             "Mandatsunterschrift - der Tabellenblattname ist beliebig, siehe --sheet)",
     )
     p.add_argument(
-        "--sheet", default="SEPA_Lastschrift",
-        help="Name des Tabellenblatts, das die Lastschriftzeilen enthält (nur bei Excel-Dateien "
-             "relevant, wird bei .csv ignoriert)",
+        "--sheet", default=None, metavar="BLATT",
+        help="Name eines bestimmten Tabellenblatts (nur bei Excel-Dateien relevant, wird bei .csv "
+             "ignoriert). Ohne Angabe wird automatisch jedes sichtbare Tabellenblatt verarbeitet - "
+             "je eine SEPA-Datei pro Blatt mit gültigen Lastschriftdaten; Blätter ohne passende "
+             "Daten (falsches Schema) werden übersprungen und am Ende gemeldet",
     )
     p.add_argument(
         "--creditor", type=Path, default=Path(__file__).with_name("creditor.json"),
@@ -542,10 +642,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="SEPA-Lastschriftverfahren. Ausführliche Erklärung siehe unten",
     )
     p.add_argument(
-        "--no-batch-booking", action="store_true",
-        help="Alle Buchungen einzeln auf dem Kontoauszug ausweisen (Einzelbuchung). Ohne diese "
-             "Option werden sie als eine Sammelbuchung gebucht (Standard, spart in der Regel "
-             "Buchungsgebühren und ist bei Sparkassen üblich)",
+        "--batch-booking", action="store_true",
+        help="Alle Buchungen als eine Sammelbuchung zusammenfassen. Ohne diese Option wird jede "
+             "Buchung einzeln auf dem Kontoauszug ausgewiesen (Einzelbuchung, Standard)",
     )
     p.add_argument(
         "--message-id", default=None, metavar="ID",
@@ -575,13 +674,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        result = generate_sepa_file(
+        summary = generate_sepa_file(
             input_path=args.input,
             creditor_path=args.creditor,
             collection_date=collection_date,
             sequence_type=args.sequence_type,
             instrument_code=args.instrument,
-            batch_booking=not args.no_batch_booking,
+            batch_booking=args.batch_booking,
             message_id=args.message_id,
             payment_id=args.payment_id,
             out_dir=args.out,
@@ -605,10 +704,23 @@ def main(argv: list[str] | None = None) -> int:
     except NoRowsError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    except NoValidSheetsError as exc:
+        print("Kein Tabellenblatt enthielt gültige Lastschriftdaten:", file=sys.stderr)
+        for name, reason in exc.skipped:
+            print(f"  - {name}: {reason}", file=sys.stderr)
+        return 1
 
-    print(f"SEPA-XML-Datei erstellt: {result.output_path}")
-    print(f"Anzahl Datensätze: {result.row_count}")
-    print(f"Summe Datensätze: {result.total_amount:.2f} {result.currency}")
+    for result in summary.results:
+        label = f" (Blatt '{result.sheet_name}')" if result.sheet_name else ""
+        print(f"SEPA-XML-Datei erstellt{label}: {result.output_path}")
+        print(f"  Anzahl Datensätze: {result.row_count}")
+        print(f"  Summe Datensätze: {result.total_amount:.2f} {result.currency}")
+
+    if summary.skipped:
+        print("\nÜbersprungene Tabellenblätter (kein passendes Schema):")
+        for name, reason in summary.skipped:
+            print(f"  - {name}: {reason}")
+
     return 0
 
 

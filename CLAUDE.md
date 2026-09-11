@@ -18,14 +18,44 @@ Makro-Unterstützung in aktuellen Excel-Versionen.
   des SEPA-XML sowie eine CLI (`main()`/`parse_args()`). Zentraler
   Einstiegspunkt für beide Bedienwege ist `generate_sepa_file()` - CLI
   und GUI rufen ausschließlich diese Funktion auf, um Logik nicht zu
-  duplizieren.
+  duplizieren. Rückgabewert ist ein `GenerationSummary`
+  (`results: list[GenerationResult]` + `skipped: list[tuple[str, str]]`),
+  da eine Excel-Datei mit mehreren Tabellenblättern mehrere Ausgabedateien
+  erzeugen kann (siehe unten).
 - `gui.py` - Tkinter-Oberfläche, importiert `sepa_lastschrift` als Modul.
   Enthält keine eigene Geschäftslogik, nur Widgets und Fehleranzeige.
 - Fehler werden über eigene Exceptions transportiert, nicht `SystemExit`,
   damit die GUI sie in Dialogen anzeigen kann:
-  `ValidationError`, `SheetNotFoundError`, `RowValidationErrors` (trägt
-  `.errors: list[str]`), `NoRowsError`. CLI (`main()`) fängt sie ab und
+  `ValidationError`, `SheetNotFoundError` (explizit per `--sheet`
+  gewähltes Blatt existiert nicht), `RowValidationErrors` (trägt
+  `.errors: list[str]`), `NoRowsError`, `NoValidSheetsError` (Automatik-
+  Modus: kein einziges Tabellenblatt enthielt gültige Daten, trägt
+  `.skipped: list[tuple[str, str]]`). CLI (`main()`) fängt sie ab und
   gibt sie auf stderr aus, GUI zeigt sie in `messagebox`-Dialogen.
+
+## Mehrblatt-Verhalten (Automatik-Modus, kein `--sheet` angegeben)
+
+Ohne explizit gewähltes Blatt wird jedes *sichtbare* Tabellenblatt einer
+Excel-Datei versucht (`visible_sheet_names()` filtert versteckte Blätter
+wie alte Nachschlagelisten aus dem Original-Template komplett heraus - die
+werden nicht einmal als "übersprungen" gemeldet). Pro Blatt:
+
+- keine Zeilen gefunden, oder Zeilen mit Validierungsfehlern → Blatt wird
+  übersprungen, Grund landet in `GenerationSummary.skipped`, Verarbeitung
+  der übrigen Blätter läuft weiter (Nutzer soll nicht durch ein einzelnes
+  falsch beschriftetes Blatt blockiert werden)
+- gültige Daten → eigene SEPA-Datei für dieses Blatt
+
+Ist am Ende `results` leer, wird `NoValidSheetsError` geworfen (harter
+Fehler - nichts wurde erzeugt). Wird dagegen explizit `--sheet` angegeben,
+gilt das strikt: fehlt das Blatt → `SheetNotFoundError`, ist es leer/
+fehlerhaft → `NoRowsError`/`RowValidationErrors` (kein Überspringen, da der
+Nutzer die Auswahl bewusst getroffen hat). Gleiches gilt für CSV-Dateien
+(kein Blattkonzept, immer strikt).
+
+Message-/Payment-ID werden bei mehreren erzeugten Dateien pro Lauf mit
+einem laufenden Index eindeutig gemacht (`<id>-<n>`), damit nicht mehrere
+SEPA-Dateien mit identischer `MsgId` bei der Bank eingereicht werden.
 
 ## Wichtig: Faithfulness zum Original-Makro
 
@@ -36,9 +66,16 @@ bewusst 1:1 aus dem VBA-Original übernommen, damit sich das Verhalten
 gegenüber der bisherigen Excel-Lösung nicht ändert. Änderungen an diesen
 Regeln nur nach expliziter Rücksprache, nicht "verbessern" ohne Anlass.
 
-Erwartetes Spaltenformat der Mitgliederliste (Blatt `SEPA_Lastschrift`,
-Zeile 1 = Kopfzeile, ab Zeile 2 Daten, Abbruch bei leerer Spalte A):
+Erwartetes Spaltenformat der Mitgliederliste (Blattname beliebig, siehe
+Mehrblatt-Verhalten unten; Zeile 1 = Kopfzeile, ab Zeile 2 Daten, Abbruch
+bei leerer Spalte A):
 `A Name | B Betrag | C BIC | D IBAN | E Verwendungszweck | F EndToEndId | G Mandatsreferenz | H Datum Mandatsunterschrift`
+
+Standard ist Einzelbuchung (`batch_booking=False`), Sammelbuchung ist
+Opt-in (CLI: `--batch-booking`, GUI: Checkbox unter „Erweiterte
+Einstellungen"). Ausgabedateiname: `<Eingabedateiname ohne Endung>SEPA.xml`,
+bei mehreren erzeugten Dateien pro Lauf zusätzlich mit `_<Blattname>` -
+nicht mehr die alte `CDD_<MsgId>_<PmtInfId>.xml`-Namenskonvention.
 
 ## Vereinsdaten
 
