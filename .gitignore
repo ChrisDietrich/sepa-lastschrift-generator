@@ -2,12 +2,16 @@
 creditor.json
 
 # Generierte SEPA-XML-Ausgabedateien
-CDD_*.xml
-CDB_*.xml
+*SEPA.xml
+*SEPA_*.xml
 
 # Test-/Mitgliederdaten
 *.xlsx
 *.xlsm
+
+# Ausnahme: feste, fiktive Testdaten zum Ausprobieren (siehe testing/)
+!testing/creditor.json
+!testing/*.xlsx
 
 # Python
 __pycache__/
