@@ -88,14 +88,21 @@ flüchtigen Temp-Ordner zeigen lässt).
 
 ## Build & Release
 
-`.github/workflows/build.yml` baut bei jedem Push auf `main` (und per
-`workflow_dispatch`) mit PyInstaller je eine Windows-`.exe` und eine
-macOS-`.app` und veröffentlicht beide als Assets im GitHub Release mit
-festem Tag `latest` (kein Semantic Versioning, rollierendes Release - der
-alte `latest`-Release/Tag wird vor jedem Lauf gelöscht und neu angelegt).
-Download-Link für Endnutzer: `.../releases/latest`, nicht der
-Actions-Artifacts-Bereich (erfordert GitHub-Login, daher ungeeignet für
-Vereinsmitglieder ohne Account).
+`.github/workflows/build.yml` baut mit PyInstaller je eine Windows-`.exe`
+und eine macOS-`.app` und veröffentlicht sie als Release-Assets. Zwei
+parallele Auslöser:
+
+- **Push auf `main`** (und `workflow_dispatch`) → aktualisiert das
+  rollierende Release mit festem Tag `latest` (kein Semantic Versioning;
+  der alte `latest`-Release/Tag wird vor jedem Lauf gelöscht und neu
+  angelegt). Download-Link für Endnutzer: `.../releases/latest`, nicht
+  der Actions-Artifacts-Bereich (erfordert GitHub-Login, daher ungeeignet
+  für Vereinsmitglieder ohne Account).
+- **Push eines Tags `v*`** (z. B. `git tag v0.1.0 && git push origin
+  v0.1.0`) → erzeugt zusätzlich ein eigenes, unveränderliches Release
+  unter diesem Tag-Namen (`gh release create "$TAG" --generate-notes`).
+  Für nachvollziehbare, zitierbare Versionsstände - `latest` bleibt davon
+  unberührt und zeigt weiterhin einfach den neuesten `main`-Stand.
 
 Lokal bauen: `pip install pyinstaller -r requirements.txt && pyinstaller
 --onefile --windowed --name SEPA-Lastschrift-Generator gui.py`.
