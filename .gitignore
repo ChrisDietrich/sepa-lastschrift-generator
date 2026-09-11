@@ -1,0 +1,23 @@
+# Vereinsdaten - gehören nie ins Repo
+creditor.json
+
+# Generierte SEPA-XML-Ausgabedateien
+CDD_*.xml
+CDB_*.xml
+
+# Test-/Mitgliederdaten
+*.xlsx
+*.xlsm
+
+# Python
+__pycache__/
+*.pyc
+.venv*/
+venv/
+
+# PyInstaller-Build-Artefakte
+build/
+dist/
+*.spec
+
+.DS_Store
